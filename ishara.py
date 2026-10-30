@@ -56,8 +56,10 @@ DEFAULTS = {
     "multi_click_ms": 450,
     "multi_click_radius_px": 24,
     "right_click": True,
+    "scroll_mode": "joystick",        # "joystick": হাত উপরে/নিচে ধরে রাখলে একটানা স্ক্রল
+                                      # "drag": পেজ হাতের সাথে চলে (টাচস্ক্রিনের মতো)
     "scroll_speed": 1.6,
-    "scroll_natural": True,           # True = হাতের সাথে পেজ চলে (টাচের মতো)
+    "scroll_invert": False,           # স্ক্রল উল্টো দিকে গেলে True করুন
     "horizontal_scroll": False,
     "dwell_click": False,
     "dwell_ms": 900,
@@ -452,6 +454,9 @@ class Tracker:
         self.freeze_until = 0.0
         self.last_click = (0.0, (0, 0), 0)
         self.scroll_prev = None
+        self.scroll_anchor = None
+        self.scroll_vel = (0.0, 0.0)
+        self.scroll_on = self.scroll_off = 0
         self.dwell_anchor, self.dwell_t, self.dwell_armed = None, 0.0, True
         self.dwell_progress = 0.0
         self.cross_sign, self.cross_times = None, []
@@ -613,27 +618,31 @@ class Tracker:
         sx, sy = self.fx(rx, now), self.fy(ry, now)
         self.screen_pt = (sx, sy)
 
-        # ── স্ক্রল পোজ: তর্জনী+কনিষ্ঠা উপরে, মধ্যমা+অনামিকা ভাঁজ ──
-        if reach[0] > EXT * 0.92 and reach[3] > EXT * 0.88 and folded[1] and folded[2]:
-            self.end_press()
+        # ── স্ক্রল পোজ: ✌️ (তর্জনী+মধ্যমা) অথবা 🤘 (তর্জনী+কনিষ্ঠা), বাকিগুলো ভাঁজ ──
+        up, down = reach > 1.45, reach < 1.45
+        peace = up[0] and up[1] and down[2] and down[3]
+        rock = up[0] and reach[3] > 1.4 and down[1] and down[2]
+        if peace or rock:
+            self.scroll_on, self.scroll_off = self.scroll_on + 1, 0
+        else:
+            self.scroll_on, self.scroll_off = 0, self.scroll_off + 1
+        in_scroll = self.state == "SCROLL"
+        if (not in_scroll and self.scroll_on >= 3) or (in_scroll and self.scroll_off < 4):
+            if not in_scroll:
+                self.end_press()
+                self.state = "SCROLL"
+                self.scroll_prev = None
             self.driver.hold()
-            self.state = "SCROLL"
-            if self.scroll_prev is not None:
-                dx, dy = sx - self.scroll_prev[0], sy - self.scroll_prev[1]
-                sp = float(self.cfg["scroll_speed"])
-                sgn = -1 if self.cfg["scroll_natural"] else 1
-                if abs(dy) < 0.8:
-                    dy = 0
-                if abs(dx) < 0.8 or not self.cfg["horizontal_scroll"]:
-                    dx = 0
-                if dx or dy:
-                    self.driver.add_scroll(sgn * -dx * sp, sgn * -dy * sp)
-            self.scroll_prev = (sx, sy)
+            self.do_scroll(sx, sy, now)
             return
-        self.scroll_prev = None
-        if self.state == "SCROLL":
+        if in_scroll:
             self.state = "ACTIVE"
+            self.scroll_prev = None
+            self.scroll_vel = (0.0, 0.0)
             self.driver.sync()
+            self.fx.reset()
+            self.fy.reset()
+            return
 
         # ── ক্লিক: তর্জনী মধ্যমার তুলনায় নামলো কি না (হাত কাত হলে ভুল ক্লিক হবে না) ──
         sens = float(self.cfg["click_sensitivity"])
@@ -697,6 +706,38 @@ class Tracker:
                     self.mouse.click("left")
                     play("Tink", self.cfg)
 
+    def do_scroll(self, sx, sy, now):
+        """joystick: পোজ শুরুর জায়গা = মাঝখান; যত দূরে হাত, তত দ্রুত একটানা স্ক্রল।
+        drag: পেজ হাতের সাথে চলে (টাচস্ক্রিনের মতো)।"""
+        sp = float(self.cfg["scroll_speed"])
+        inv = -1 if self.cfg.get("scroll_invert") else 1
+        horiz = self.cfg["horizontal_scroll"]
+        if self.scroll_prev is None:          # প্রথম ফ্রেম: মাঝখান ঠিক করা
+            self.scroll_prev = (sx, sy, now)
+            self.scroll_anchor = (sx, sy)
+            self.scroll_vel = (0.0, 0.0)
+            return
+        px, py, pt = self.scroll_prev
+        dt = min(max(now - pt, 0.0), 0.1)
+        self.scroll_prev = (sx, sy, now)
+
+        if self.cfg.get("scroll_mode", "joystick") == "drag":
+            dx, dy = sx - px, sy - py
+            dx = dx if (horiz and abs(dx) > 0.8) else 0.0
+            dy = dy if abs(dy) > 0.8 else 0.0
+            self.driver.add_scroll(inv * dx * sp, inv * dy * sp)
+            return
+
+        dead = self.mouse.h * 0.035
+        def speed(off):
+            e = max(abs(off) - dead, 0.0)
+            return math.copysign(sp * (2 * e + e * e / 40), off) if e else 0.0
+        vy = speed(sy - self.scroll_anchor[1])
+        vx = speed(sx - self.scroll_anchor[0]) if horiz else 0.0
+        self.scroll_vel = (vx, vy)
+        # হাত উপরে → পেজের উপরের দিকে যায়
+        self.driver.add_scroll(inv * -vx * dt, inv * -vy * dt)
+
     def start_press(self, btn, now, sx, sy):
         self.driver.hold()
         t0, pos0, n0 = self.last_click
@@ -745,6 +786,11 @@ class Tracker:
             color = {"CLICK": (0, 0, 255), "DRAG": (0, 0, 255), "RIGHT": (255, 0, 255),
                      "SCROLL": (0, 200, 255)}.get(self.state, (0, 220, 0))
             cv2.circle(frame, c, 14, color, 3)
+            if self.state == "SCROLL":
+                vx, vy = self.scroll_vel
+                L = max(-120, min(120, -vy / 12))
+                cv2.arrowedLine(frame, c, (c[0], int(c[1] - L)), (0, 200, 255), 4, tipLength=0.3)
+                cv2.line(frame, (c[0] - 30, c[1]), (c[0] + 30, c[1]), (0, 200, 255), 1)
             if self.dwell_progress > 0:
                 cv2.ellipse(frame, c, (22, 22), -90, 0, int(360 * self.dwell_progress), (0, 255, 255), 3)
         if self.area:
@@ -830,7 +876,11 @@ def run_menubar(tracker, cfg):
             self.d_item = rumps.MenuItem("Dwell click (স্থির রাখলে ক্লিক)", callback=self.toggle_dwell)
             self.a_item = rumps.MenuItem("কার্সর আঙুলের ডগায়", callback=self.toggle_anchor)
             self.s_item = rumps.MenuItem("শব্দ", callback=self.toggle_sound)
-            self.menu = [self.t_item, None, self.d_item, self.a_item, self.s_item, None,
+            self.j_item = rumps.MenuItem("জয়স্টিক স্ক্রল (বন্ধ = টাচের মতো টানা)",
+                                         callback=self.toggle_scroll_mode)
+            self.i_item = rumps.MenuItem("স্ক্রলের দিক উল্টাও", callback=self.toggle_invert)
+            self.menu = [self.t_item, None, self.d_item, self.a_item, self.j_item, self.i_item,
+                         self.s_item, None,
                          rumps.MenuItem("Settings ফাইল খুলুন", callback=self.open_settings),
                          rumps.MenuItem("Settings রিলোড", callback=self.reload),
                          None, rumps.MenuItem("বন্ধ করুন", callback=self.quit)]
@@ -842,6 +892,8 @@ def run_menubar(tracker, cfg):
             self.d_item.state = int(bool(cfg["dwell_click"]))
             self.a_item.state = int(cfg["cursor_anchor"] == "fingertip")
             self.s_item.state = int(bool(cfg["sounds"]))
+            self.j_item.state = int(cfg.get("scroll_mode", "joystick") == "joystick")
+            self.i_item.state = int(bool(cfg.get("scroll_invert")))
 
         def refresh(self, _):
             self.title = ICONS.get(tracker.state, "✋")
@@ -865,6 +917,16 @@ def run_menubar(tracker, cfg):
 
         def toggle_sound(self, _):
             cfg["sounds"] = not cfg["sounds"]
+            save_config(cfg)
+            self.sync_menu()
+
+        def toggle_scroll_mode(self, _):
+            cfg["scroll_mode"] = "drag" if cfg.get("scroll_mode", "joystick") == "joystick" else "joystick"
+            save_config(cfg)
+            self.sync_menu()
+
+        def toggle_invert(self, _):
+            cfg["scroll_invert"] = not cfg.get("scroll_invert")
             save_config(cfg)
             self.sync_menu()
 
