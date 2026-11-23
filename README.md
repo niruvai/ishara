@@ -65,6 +65,10 @@ System Settings → Privacy & Security:
 | `gestures` | প্রতিটা ইশারার অ্যাকশন: `shortcut` (যেমন `cmd+shift+4`), `app` (অ্যাপের নাম), `command` (শেল কমান্ড), `none` |
 | `per_app` | নির্দিষ্ট অ্যাপে ইশারার আলাদা অ্যাকশন |
 
+## যোগাযোগ
+
+প্রশ্ন বা মতামত: [nirob@nirobislam.com](mailto:nirob@nirobislam.com)
+
 ## লাইসেন্স
 
 MIT
